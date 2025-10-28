@@ -109,7 +109,7 @@ app_until_generate = graph.compile(interrupt_before=["node_generate"])
 
 # ------------ 실행 예시 ------------
 if __name__ == "__main__":
-    question = "가지급금을 받기 위해 필요한 절차와 서류를 단계별로 알려줘."
+    question = "발차기는 어떻게 하나요?"
 
     print("=== 1) 일반 실행 ===")
     t0 = time.perf_counter()
