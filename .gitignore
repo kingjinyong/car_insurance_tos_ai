@@ -5,3 +5,9 @@ pdfs/
 *.bin
 *.sqlite3
 *.bin
+pdfs/
+chroma_insurance/
+*.sqlite3
+*.bin
+.env
+.env.*
