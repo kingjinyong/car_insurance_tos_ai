@@ -1,5 +1,7 @@
 import os
 import time
+
+# import warnings
 from typing import List, TypedDict
 
 from dotenv import load_dotenv, find_dotenv
@@ -10,6 +12,8 @@ from langchain_core.prompts import ChatPromptTemplate
 
 # LangGraph
 from langgraph.graph import StateGraph, END
+
+# warnings.filterwarnings("ignore", message="Relevance scores must be between 0 and 1")
 
 load_dotenv(find_dotenv())
 
@@ -26,11 +30,14 @@ vectorstore = Chroma(
     persist_directory=PERSIST_DIR,
 )
 
-retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 3})
+retriever = vectorstore.as_retriever(
+    search_type="similarity",
+    search_kwargs={"k": 10},
+)
 
 model = ChatUpstage(
     model="solar-mini",
-    temperature=0,
+    temperature=0.1,
     # 필요 시 출력 제한:
     # max_tokens=192
 )
@@ -39,7 +46,15 @@ prompt = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            "다음 CONTEXT로만 한국어로 간결하게 답하세요. 모르면 '잘 모르겠습니다'라고 답하세요.\nCONTEXT:\n{context}",
+            (
+                """
+                아래 규칙을 반드시 지켜라.
+                - 오직 CONTEXT 내용을 기반으로 답하라.
+                - CONTEXT에 해당 정보가 없거나 질문이 무관하면, 아무 설명 없이 '잘 모르겠습니다"라고만 답하라.
+                - 한국어로 답하라.
+                -------
+                CONTEXT:\n{context}"""
+            ),
         ),
         ("human", "{question}"),
     ]
@@ -73,6 +88,7 @@ class RAGState(TypedDict):
 def node_retrieve(state: RAGState) -> RAGState:
     q = state["question"]
     docs = retriever.invoke(q)
+    print(f"[DEBUG] retrieved docs: {len(docs)}")
     return {**state, "docs": docs}
 
 
@@ -85,7 +101,7 @@ def node_trim(state: RAGState) -> RAGState:
 def node_generate(state: RAGState) -> RAGState:
     ctx = state.get("context", "").strip()
     if not ctx:
-        return {**state, "answer": "잘 모르겠습니다."}
+        return {**state, "answer": "해당 질문은 잘 모르겠습니다."}
 
     messages = prompt.format_messages(context=ctx, question=state["question"])
     out = model.invoke(messages)
@@ -93,48 +109,48 @@ def node_generate(state: RAGState) -> RAGState:
     return {**state, "answer": text}
 
 
+def node_fallback(state: RAGState) -> RAGState:
+    # 컨텍스트가 비어있거나 의미 없는 경우 즉시 종료 응답
+    return {**state, "answer": f"해당 질문은 잘 모르겠습니다."}
+
+
+def has_context(state: RAGState) -> str:
+    """
+    context가 비어있지 않으면 node_generate로,
+    비어있으면 node_fallback으로 분기
+    """
+
+    ctx = (state.get("context") or "").strip()
+    return "node_generate" if ctx else "node_fallback"
+
+
 # ------------ 그래프 구성 ------------
 graph = StateGraph(RAGState)
 graph.add_node("node_retrieve", node_retrieve)
 graph.add_node("node_trim", node_trim)
 graph.add_node("node_generate", node_generate)
-graph.set_entry_point("node_retrieve")
-graph.add_edge("node_retrieve", "node_trim")
-graph.add_edge("node_trim", "node_generate")
-graph.add_edge("node_generate", END)
+graph.add_node("node_fallback", node_fallback)
 
+graph.set_entry_point("node_retrieve")
+
+graph.add_edge("node_retrieve", "node_trim")
+graph.add_conditional_edges("node_trim", has_context)
+
+graph.add_edge("node_generate", END)
+graph.add_edge("node_fallback", END)
 
 app = graph.compile()
 app_until_generate = graph.compile(interrupt_before=["node_generate"])
 
 # ------------ 실행 예시 ------------
 if __name__ == "__main__":
-    question = "발차기는 어떻게 하나요?"
+    question = "배달-대여라이더이륜자동차 보험은 어떤 사람을 대상으로 만든 상품이야?"
 
-    print("=== 1) 일반 실행 ===")
+    # -- 초 세기 시작
     t0 = time.perf_counter()
+
     result = app.invoke({"question": question, "docs": [], "context": "", "answer": ""})
     print(result["answer"])
+
+    # -- 초 세기 끝
     print(f"\n총 소요: {time.perf_counter() - t0:.2f}s\n")
-
-    print("=== 2) 세미 스트리밍 (generate 전까지 그래프 실행 -> LLM만 스트리밍) ===")
-    # 그래프를 generate 바로 전까지 실행 (context 까지 확보)
-    state = app_until_generate.invoke(
-        {"question": question, "docs": [], "context": "", "answer": ""}
-    )
-    ctx = state.get("context", "")
-
-    if not ctx.strip():
-        print("컨텍스트 없음 -> 잘 모르겠습니다.")
-    else:
-        msgs = prompt.format_messages(context=ctx, question=question)
-        t1 = time.perf_counter()
-        first = None
-        for chunk in model.stream(msgs):
-            text = getattr(chunk, "content", None) or str(chunk)
-            if text:
-                if first is None:
-                    first = time.perf_counter()
-                    print(f"\n첫 토큰까지: {first - t1:.2f}s\n")
-                print(text, end="", flush=True)
-        print("\n")

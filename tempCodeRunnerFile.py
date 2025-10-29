@@ -26,7 +26,7 @@ def load_pdf(path: Path) -> List[Document]:
     docs = loader.load()
     for doc in docs:
         doc.metadata["source"] = str(path)
-        doc.metadata["modified_at"] = datetime.fromtimestamp(
+        doc.metadate["modified_at"] = datetime.fromtimestamp(
             path.stat().st_mtime
         ).isoformat()
     return docs
