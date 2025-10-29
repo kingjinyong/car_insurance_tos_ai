@@ -1,4 +1,5 @@
-.envchroma_insurance/
+.env
+chroma_insurance/
 *.sqlite3
 *.bin
 chroma_insurance/
