@@ -32,7 +32,7 @@ vectorstore = Chroma(
 
 retriever = vectorstore.as_retriever(
     search_type="similarity",
-    search_kwargs={"k": 10},
+    search_kwargs={"k": 6},
 )
 
 model = ChatUpstage(
@@ -42,21 +42,45 @@ model = ChatUpstage(
     # max_tokens=192
 )
 
-prompt = ChatPromptTemplate.from_messages(
+node_generate_prompt = ChatPromptTemplate.from_messages(
     [
         (
             "system",
             (
                 """
                 아래 규칙을 반드시 지켜라.
+                - 너는 KB손해보험사의 모든 자동차 보험약관을 알고있는 보험 전문가다.
                 - 오직 CONTEXT 내용을 기반으로 답하라.
-                - CONTEXT에 해당 정보가 없거나 질문이 무관하면, 아무 설명 없이 '잘 모르겠습니다"라고만 답하라.
+                - CONTEXT에 해당 정보가 없거나 질문이 무관하거나 직접적인 관련이 없다면, 아무 설명 없이 '잘 모르겠습니다"라고만 답하라.
                 - 한국어로 답하라.
                 -------
                 CONTEXT:\n{context}"""
             ),
         ),
         ("human", "{question}"),
+    ]
+)
+
+
+enrich_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            (
+                """
+                아래 규칙을 반드시 지켜라.
+                - 답변 속 전문 용어나 조항을 한국어로 쉽게 풀어 써라.
+                - 보험 상품에 대한 내용이 있다면, 해당 보험 상품에 대한 설명을 해라.
+                - CONTEXT기반으로 답하라.
+                - bullet 목록 형태로 정리.
+                -------
+                CONTEXT:\n{context}"""
+            ),
+        ),
+        (
+            "human",
+            "{answer} 을 자세히 설명이 필요한 부분을 정리해서 다시 재가공해서 답변해줘",
+        ),
     ]
 )
 
@@ -82,6 +106,7 @@ class RAGState(TypedDict):
     docs: List[Document]
     context: str
     answer: str
+    enrich_docs: List[Document]
 
 
 # ----- 노드 -----
@@ -103,15 +128,27 @@ def node_generate(state: RAGState) -> RAGState:
     if not ctx:
         return {**state, "answer": "해당 질문은 잘 모르겠습니다."}
 
-    messages = prompt.format_messages(context=ctx, question=state["question"])
+    messages = node_generate_prompt.format_messages(
+        context=ctx, question=state["question"]
+    )
     out = model.invoke(messages)
     text = getattr(out, "content", None) or str(out)
     return {**state, "answer": text}
 
 
+def node_enrich(state: RAGState) -> RAGState:
+    answer = state["answer"]
+    context = state["context"]
+    print(answer)
+    print("\n")
+    messages = enrich_prompt.format_messages(context=context, answer=answer)
+    enriched = model.invoke(messages).content
+    return {**state, "answer": enriched}
+
+
 def node_fallback(state: RAGState) -> RAGState:
     # 컨텍스트가 비어있거나 의미 없는 경우 즉시 종료 응답
-    return {**state, "answer": f"해당 질문은 잘 모르겠습니다."}
+    return {**state, "answer": "해당 질문은 잘 모르겠습니다."}
 
 
 def has_context(state: RAGState) -> str:
@@ -129,6 +166,7 @@ graph = StateGraph(RAGState)
 graph.add_node("node_retrieve", node_retrieve)
 graph.add_node("node_trim", node_trim)
 graph.add_node("node_generate", node_generate)
+graph.add_node("node_enrich", node_enrich)
 graph.add_node("node_fallback", node_fallback)
 
 graph.set_entry_point("node_retrieve")
@@ -136,15 +174,14 @@ graph.set_entry_point("node_retrieve")
 graph.add_edge("node_retrieve", "node_trim")
 graph.add_conditional_edges("node_trim", has_context)
 
-graph.add_edge("node_generate", END)
+graph.add_edge("node_generate", "node_enrich")
+graph.add_edge("node_enrich", END)
 graph.add_edge("node_fallback", END)
 
 app = graph.compile()
-app_until_generate = graph.compile(interrupt_before=["node_generate"])
-
 # ------------ 실행 예시 ------------
 if __name__ == "__main__":
-    question = "배달-대여라이더이륜자동차 보험은 어떤 사람을 대상으로 만든 상품이야?"
+    question = "모터바이크 종합보험의 특약은 어떤 것들이 있어?"
 
     # -- 초 세기 시작
     t0 = time.perf_counter()
