@@ -1,7 +1,7 @@
 .env
 chroma_insurance/
+pdfs/
 *.sqlite3
 *.bin
-chroma_insurance/
 *.sqlite3
 *.bin
